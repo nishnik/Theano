@@ -316,48 +316,42 @@ theano.compile.optdb['uncanonicalize'].register("local_hard_sigmoid",
                                                 local_hard_sigmoid)
 
 
-class ScalarSoftplus(scalar.UnaryScalarOp):
+class ScalarSoftplus(scalar.ScalarOp):
     """
     This helps numerical stability.
     """
+    beta_ = 1.0
+    threshold_ = 30.0
     @staticmethod
-    def static_impl(x):
-        if x < -30.0:
-            return 0.0
-        if x > 30.0:
+    def static_impl(x, beta, threshold):
+        beta_x = beta * x
+        if beta_x > threshold:
             return x
         # If x is an int8 or uint8, numpy.exp will compute the result in
         # half-precision (float16), where we want float32.
         x_dtype = str(getattr(x, 'dtype', ''))
         if x_dtype in ('int8', 'uint8'):
-            return np.log1p(np.exp(x, sig='f'))
-        return np.log1p(np.exp(x))
+            return np.log1p(np.exp(beta_x, sig='f'))/beta
+        return np.log1p(np.exp(beta_x))/beta
 
     def impl(self, x):
-        return ScalarSoftplus.static_impl(x)
+        x, beta_, threshold_ = x
+        return ScalarSoftplus.static_impl(x, beta_, threshold_)
 
     def grad(self, inp, grads):
-        x, = inp
+        x, beta, threshold = inp
+        beta_x = self.beta_ * x
         gz, = grads
-        return [gz * scalar_sigmoid(x)]
+        return [gz * scalar_sigmoid(beta_x) if beta_x < self.threshold_ else gz]
 
     def c_code(self, node, name, inp, out, sub):
-        x, = inp
+        x, beta, threshold = inp
         z, = out
-        # These constants were obtained by looking at the output of
-        # python commands like:
-        #  for i in xrange(750):
-        #      print i, repr(numpy.log1p(numpy.exp(theano._asarray([i,-i], dtype=dt))))
-        # the boundary checks prevent us from generating inf
-
-        # float16 limits: -17.0, 6.0
-        # We use the float32 limits for float16 for now as the
-        # computation will happen in float32 anyway.
+        # beta = self.beta_
+        # threshold = self.threshold_
         if (node.inputs[0].type == scalar.float32 or
-                node.inputs[0].type == scalar.float16):
-            return """%(z)s = %(x)s < -103.0f ? 0.0 : %(x)s > 14.0f ? %(x)s : log1p(exp(%(x)s));""" % locals()
-        elif node.inputs[0].type == scalar.float64:
-            return """%(z)s = %(x)s < -745.0 ? 0.0 : %(x)s > 16.0 ? %(x)s : log1p(exp(%(x)s));""" % locals()
+                node.inputs[0].type == scalar.float16 or node.inputs[0].type == scalar.float64):
+            return """%(z)s = %(beta)s * %(x)s > %(threshold)s ? %(x)s : log1p(exp(%(beta)s * %(x)s))/%(beta)s;""" % locals()
         else:
             raise NotImplementedError('only floatingpoint is implemented')
 
@@ -367,6 +361,27 @@ class ScalarSoftplus(scalar.UnaryScalarOp):
             return (2,) + v
         else:
             return v
+
+    def c_code_contiguous(self, node, name, inputs, outputs, sub):
+        (x, beta, threshold) = inputs
+        (z,) = outputs
+        if (not theano.config.lib.amdlibm or
+                # We compare the dtype AND the broadcast flag
+                # as this function do not broadcast
+                node.inputs[0].type != node.outputs[0].type):
+            raise theano.gof.utils.MethodNotDefined()
+
+        dtype = node.inputs[0].type.dtype_specs()[1]
+        fct_call = self.c_code_contiguous_raw(dtype, 'n', 'x', 'z')
+        return """
+{
+        npy_intp n = PyArray_SIZE(%(z)s);
+        %(dtype)s * x = (%(dtype)s*) PyArray_DATA(%(x)s);
+        %(dtype)s * z = (%(dtype)s*) PyArray_DATA(%(z)s);
+        %(fct_call)s;
+}
+        """ % locals()
+
 scalar_softplus = ScalarSoftplus(scalar.upgrade_to_float,
                                  name='scalar_softplus')
 softplus = elemwise.Elemwise(scalar_softplus, name='softplus')

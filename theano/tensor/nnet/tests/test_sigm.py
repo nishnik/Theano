@@ -83,6 +83,9 @@ class T_softplus(unittest.TestCase):
     def test_elemwise(self):
         utt.verify_grad(softplus, [np.random.rand(3, 4)])
 
+    def test_elemwise(self):
+        utt.verify_grad(softplus, ([np.random.rand(3, 4)], 2.0, 20.0))
+
 
 class T_sigmoid_opts(unittest.TestCase):
 
